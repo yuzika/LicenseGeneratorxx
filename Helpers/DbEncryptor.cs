@@ -1,97 +1,60 @@
 ﻿using System;
-using System.Data.SQLite;
 using System.IO;
+using Microsoft.Data.Sqlite;
+using SQLitePCL;
 
 namespace LicenseGenerator.Helpers
 {
     public static class DbEncryptor
     {
-        public static bool EncryptDatabase(string sourcePath, string targetPath, string password)
+        public static bool EncryptDatabase(string sourceDbPath, string outputEncryptedDbPath, string dbGuidKey, out string message)
         {
+            return InternalEncryptDatabase(sourceDbPath, outputEncryptedDbPath, dbGuidKey, out message);
+        }
+
+        private static bool InternalEncryptDatabase(string sourceDbPath, string outputEncryptedDbPath, string dbGuidKey, out string message)
+        {
+            message = string.Empty;
+
             try
             {
-                if (!File.Exists(sourcePath))
+                if (!File.Exists(sourceDbPath))
                 {
-                    LogHelper.Log("Kaynak veritabanı dosyası bulunamadı: " + sourcePath);
+                    message = "Kaynak veritabanı bulunamadı.";
                     return false;
                 }
 
-                string tempPath = Path.Combine(Path.GetTempPath(), $"temp_{Guid.NewGuid()}.db");
+                if (File.Exists(outputEncryptedDbPath))
+                    File.Delete(outputEncryptedDbPath);
 
-                try
-                {
-                    using (var source = new SQLiteConnection($"Data Source={sourcePath};Version=3;"))
-                    using (var dest = new SQLiteConnection($"Data Source={tempPath};Version=3;Password={password};"))
-                    {
-                        source.Open();
-                        dest.Open();
+                Batteries_V2.Init();
 
-                        // DÜZELTME: Callback kaldırıldı veya doğru şekilde uygulandı
-                        source.BackupDatabase(
-                            destination: dest,
-                            destinationName: "main",
-                            sourceName: "main",
-                            pages: -1,
-                            callback: null, // Callback kaldırıldı
-                            retryMilliseconds: 100
-                        );
-
-                        // Alternatif ilerleme takibi (isteğe bağlı)
-                        LogHelper.Log("Veritabanı yedekleme işlemi başladı");
-                    }
-
-                    if (File.Exists(targetPath))
-                    {
-                        File.SetAttributes(targetPath, FileAttributes.Normal);
-                        File.Delete(targetPath);
-                    }
-
-                    File.Move(tempPath, targetPath);
-                    File.SetAttributes(targetPath, FileAttributes.Normal);
-
-                    return true;
-                }
-                finally
-                {
-                    if (File.Exists(tempPath))
-                        File.Delete(tempPath);
-                }
-            }
-            catch (Exception ex)
-            {
-                LogHelper.Log($"Şifreleme hatası: {ex}");
-                return false;
-            }
-        }
-        public static bool TestDecryption(string dbPath, string password, out string result)
-        {
-            result = string.Empty;
-
-            try
-            {
-                using (var conn = new SQLiteConnection($"Data Source={dbPath};Password={password};Version=3;"))
+                using (var conn = new SqliteConnection($"Data Source={sourceDbPath};"))
                 {
                     conn.Open();
 
-                    // Basit bir sorgu ile test etme
-                    using (var cmd = new SQLiteCommand("SELECT name FROM sqlite_master WHERE type='table' LIMIT 1", conn))
+                    // Hedef veritabanını şifreli olarak attach et
+                    using (var cmd = conn.CreateCommand())
                     {
-                        var tableName = cmd.ExecuteScalar() as string;
-                        result = tableName != null
-                            ? $"Başarılı. İlk tablo: {tableName}"
-                            : "Veritabanı boş";
-                        return true;
+                        cmd.CommandText = $"ATTACH DATABASE '{outputEncryptedDbPath}' AS encrypted KEY '{dbGuidKey}';";
+                        cmd.ExecuteNonQuery();
+
+                        cmd.CommandText = "SELECT sqlcipher_export('encrypted');";
+                        cmd.ExecuteNonQuery();
+
+                        cmd.CommandText = "DETACH DATABASE encrypted;";
+                        cmd.ExecuteNonQuery();
                     }
+
+                    conn.Close();
                 }
-            }
-            catch (SQLiteException sqlEx)
-            {
-                result = $"SQL Hatası: {sqlEx.Message}";
-                return false;
+
+                message = "Veritabanı başarıyla SQLCipher formatında şifrelendi.";
+                return true;
             }
             catch (Exception ex)
             {
-                result = $"Genel Hata: {ex.Message}";
+                message = $"Şifreleme hatası: {ex.Message}";
                 return false;
             }
         }

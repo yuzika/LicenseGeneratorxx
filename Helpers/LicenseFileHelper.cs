@@ -1,71 +1,96 @@
 ﻿using System;
 using System.IO;
-using System.Windows.Forms;
+using System.Security.Cryptography;
+using System.Text;
 using CryptoHelper;
+using LicenseGenerator.Helpers;
 
 namespace LicenseGenerator.Helpers
 {
     public static class LicenseFileHelper
     {
-        private static readonly string LicenseFileName = "license.dat";
-        private static readonly string SecretKey = "MY_STATIC_KEY_1234"; // 16/24/32 karakter uzunluğunda AES key
+        private const string Salt = "Z1x7p@#k!";
 
-        public static bool CreateLicenseFile(string usbSerial, string guid, string outputDirectory)
+        public static void CreateLicenseFile(
+            string usbSerialRaw,           // artık gelen ham serial
+            string dbGuidKey,
+            string dbMasterKey,            // 64 karakter HEX
+            string resolvedAppMasterKey,   // plain text
+            string outputPath)
         {
             try
             {
-                // outputDirectory parametresi artık doğrudan txtUsbPath2.Text olarak gönderilmeli
-                string fullPath = Path.Combine(outputDirectory, LicenseFileName);
-                string data = $"{usbSerial}|{guid}";
+                // ✅ usbSerial SHA256 sabitleme
+                string usbSerial = CryptoHelper.CryptoHelper.ComputeSHA256(usbSerialRaw);
 
-                string encrypted = CryptoHelper.CryptoHelper.EncryptString(data, SecretKey);
-                File.WriteAllText(fullPath, encrypted);
+                LogHelper.Log("[LICENSE] İşlem başlatıldı");
+                LogHelper.Log("[LICENSE] usbSerial (raw): " + usbSerialRaw);
+                LogHelper.Log("[LICENSE] usbSerial (hashed): " + usbSerial);
+                LogHelper.Log("[LICENSE] dbGuidKey: " + dbGuidKey);
+                LogHelper.Log("[LICENSE] dbMasterKey: " + dbMasterKey);
+                LogHelper.Log("[LICENSE] dbMasterKey.Length: " + dbMasterKey.Length);
 
-                return true;
+                string timestamp = DateTime.UtcNow.Ticks.ToString();
+                LogHelper.Log("[LICENSE] timestamp: " + timestamp);
+
+                string payload = $"{usbSerial}|{dbGuidKey}|{timestamp}";
+
+                byte[] iv = CryptoHelper.CryptoHelper.GenerateRandomIV();
+                LogHelper.Log("[LICENSE] IV: " + BitConverter.ToString(iv).Replace("-", ""));
+
+                byte[] aesKey = CryptoHelper.CryptoHelper.ComputeSHA256Bytes(usbSerial + resolvedAppMasterKey);
+                byte[] encryptedPayload = CryptoHelper.CryptoHelper.EncryptWithAes(payload, aesKey, iv);
+                LogHelper.Log("[LICENSE] EncryptedPayload.Length: " + encryptedPayload.Length);
+
+                byte[] hash = CryptoHelper.CryptoHelper.ComputeSha256Bytes(encryptedPayload);
+                LogHelper.Log("[LICENSE] SHA256 Hash: " + BitConverter.ToString(hash).Replace("-", ""));
+
+                byte[] signature = CryptoHelper.CryptoHelper.SignDataWithRsa(hash, AppConstants.RsaPrivateKeyXml);
+                LogHelper.Log("[LICENSE] RSA Signature Length: " + signature.Length);
+
+                byte[] appKeyKey = CryptoHelper.CryptoHelper.ComputeSHA256Bytes(usbSerial + Salt);
+                byte[] encryptedAppMasterKeyBytes = CryptoHelper.CryptoHelper.EncryptWithAes(resolvedAppMasterKey, appKeyKey, iv);
+                string encryptedAppMasterKeyBase64 = Convert.ToBase64String(encryptedAppMasterKeyBytes);
+                LogHelper.Log("[LICENSE] EncryptedAppMasterKey Base64 (ilk 32): " + encryptedAppMasterKeyBase64.Substring(0, Math.Min(32, encryptedAppMasterKeyBase64.Length)));
+                LogHelper.Log("[LICENSE] EncryptedAppMasterKey Length: " + encryptedAppMasterKeyBase64.Length);
+
+                if (File.Exists(outputPath))
+                {
+                    File.Delete(outputPath);
+                    LogHelper.Log("[LICENSE] Önceki license.dat silindi");
+                }
+
+                using (var fs = new FileStream(outputPath, FileMode.Create, FileAccess.Write))
+                using (var bw = new BinaryWriter(fs))
+                {
+                    bw.Write(iv); // 16
+                    bw.Write(encryptedPayload); // N
+                    bw.Write(hash); // 32
+                    bw.Write(signature); // 256
+
+                    if (dbMasterKey.Length != 64)
+                        throw new Exception("dbMasterKey 64 karakter HEX olmalıdır.");
+                    bw.Write(Encoding.ASCII.GetBytes(dbMasterKey)); // 64
+
+                    if (string.IsNullOrWhiteSpace(encryptedAppMasterKeyBase64))
+                        throw new Exception("encryptedAppMasterKey boş.");
+                    bw.Write(Encoding.UTF8.GetBytes(encryptedAppMasterKeyBase64)); // variable
+
+                    bw.Flush();
+                }
+
+                LogHelper.Log("[LICENSE] license.dat yazıldı: " + outputPath);
+                LogHelper.Log("[LICENSE] Toplam byte: " + new FileInfo(outputPath).Length);
+
+                byte[] finalBytes = File.ReadAllBytes(outputPath);
+                string fileHash = BitConverter.ToString(SHA256.Create().ComputeHash(finalBytes)).Replace("-", "");
+                LogHelper.Log("[LICENSE] SHA256 (dosya): " + fileHash);
             }
             catch (Exception ex)
             {
-                MessageBox.Show("Lisans dosyası oluşturulurken hata: " + ex.Message);
-                return false;
+                LogHelper.Log("[LICENSE] HATA: " + ex.Message);
+                throw new Exception("Lisans dosyası oluşturulamadı", ex);
             }
-        }
-
-        public static bool ValidateLicenseFile(string expectedUsbSerial, string licenseFilePath, out string decryptedGuid)
-        {
-            decryptedGuid = string.Empty;
-
-            try
-            {
-                // Artık dosya yolu parametre olarak alınıyor
-                if (!File.Exists(licenseFilePath))
-                {
-                    MessageBox.Show("Lisans dosyası bulunamadı.");
-                    return false;
-                }
-
-                string encrypted = File.ReadAllText(licenseFilePath);
-                string decrypted = CryptoHelper.CryptoHelper.DecryptString(encrypted, SecretKey);
-
-                string[] parts = decrypted.Split('|');
-                if (parts.Length != 2)
-                    return false;
-
-                string storedUsbSerial = parts[0];
-                decryptedGuid = parts[1];
-
-                return string.Equals(storedUsbSerial, expectedUsbSerial, StringComparison.OrdinalIgnoreCase);
-            }
-            catch
-            {
-                return false;
-            }
-        }
-
-        // Bu metod gereksiz görünüyor, ValidateLicenseFile ile birleştirilebilir
-        public static bool ValidateLicense(string licenseFilePath, string expectedUsbSerial)
-        {
-            string _;
-            return ValidateLicenseFile(expectedUsbSerial, licenseFilePath, out _);
         }
     }
 }

@@ -9,6 +9,8 @@ namespace LicenseGenerator
         [STAThread]
         static void Main()
         {
+            //SQLitePCL.raw.SetProvider(new SQLitePCL.SQLite3Provider_e_sqlcipher());
+            SQLitePCL.Batteries_V2.Init();
             Application.EnableVisualStyles();
             Application.SetCompatibleTextRenderingDefault(false);
             Application.Run(new MainForm()); // Tam nitelikli ad kullan
